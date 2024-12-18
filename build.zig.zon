@@ -1,0 +1,11 @@
+.{
+    .name = "snappyframesz",
+    .version = "0.0.1",
+    .dependencies = .{
+        .snappyz = .{
+            .url = "https://github.com/blockblaz/zig-snappy/archive/31fb3a1.tar.gz",
+            .hash = "1220a26e93b53174d700b6d840ea28e10976ea9c1ceaf2c5598ff7cf51fecc567736",
+        },
+    },
+    .paths = .{""},
+}
