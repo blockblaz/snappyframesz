@@ -1,6 +1,5 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-
 const snappy = @import("snappyz");
 
 pub fn decode(allocator: Allocator, writer: anytype, data: []const u8) !void {
@@ -20,10 +19,12 @@ pub fn decode(allocator: Allocator, writer: anytype, data: []const u8) !void {
                 }
             },
             .UNCOMPRESSED => {
-                try writer.writeAll(data[i + 4 .. i + 4 + chunk_size]);
+                // drop 4 bytes of crc as well
+                try writer.writeAll(data[i + 4 + 4 .. i + 4 + chunk_size]);
             },
             .COMPRESSED => {
-                const decoded = snappy.decode(allocator, data[i + 4 .. i + 4 + chunk_size]) catch {
+                // drop 4 bytes of crc as well
+                const decoded = snappy.decode(allocator, data[i + 4 + 4 .. i + 4 + chunk_size]) catch {
                     return SnappyFrameError.InvalidSnappyBlockDecode;
                 };
                 defer allocator.free(decoded);
@@ -36,6 +37,38 @@ pub fn decode(allocator: Allocator, writer: anytype, data: []const u8) !void {
         }
 
         i = i + 4 + chunk_size;
+    }
+}
+
+pub fn encode(allocator: Allocator, writer: anytype, data: []const u8) !void {
+    // push identifier frame
+    try writer.writeAll(&IDENTIFIER_FRAME);
+    var i: usize = 0;
+    while (i < data.len) {
+        const chunk = data[i .. i + UNCOMPRESSED_CHUNK_SIZE];
+        const compressed = snappy.encode(allocator, chunk);
+        defer allocator.free(compressed);
+
+        if (compressed.len < chunk.len) {
+            const size = compressed.len + 4;
+            const frame_header = [_]u8{ @as(u8, @intFromEnum(ChunkType.COMPRESSED)), @as(u8, @truncate(size)), @as(u8, @truncate(size >> 8)), @as(u8, @truncate(size >> 16)) };
+
+            const crc_hash = snappy.crc(chunk);
+            const crc_bytes: [4]u8 = undefined;
+            std.mem.writePackedInt(u32, crc_bytes, 0, crc_hash, .little);
+
+            try writer.writeAll(frame_header ++ crc_bytes ++ compressed);
+        } else {
+            const size = chunk.len + 4;
+            const frame_header = [_]u8{ @as(u8, @intFromEnum(ChunkType.UNCOMPRESSED)), @as(u8, @truncate(size)), @as(u8, @truncate(size >> 8)), @as(u8, @truncate(size >> 16)) };
+
+            const crc_hash = snappy.crc(chunk);
+            const crc_bytes: [4]u8 = undefined;
+            std.mem.writePackedIntLittle(u32, crc_bytes, 0, crc_hash);
+
+            try writer.writeAll(frame_header ++ crc_bytes ++ chunk);
+        }
+        i = i + UNCOMPRESSED_CHUNK_SIZE;
     }
 }
 
@@ -79,17 +112,21 @@ fn getChunkSize(data: []const u8, offset: usize) usize {
 
 const IDENTIFIER_STRING = [_]u8{ 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59 };
 const IDENTIFIER_FRAME = [_]u8{ 0xff, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59 };
+const UNCOMPRESSED_CHUNK_SIZE = 65536;
 
 test "get chunk type" {
     const ck = [_]u8{
         // frame
         0xff, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59,
         //compressed
-        0x00, 0x06, 0x00, 0x00, 0x04, 0x0c, 't',  'h',  'i',  's',
+        0x00, 0x0a, 0x00, 0x00, 0x38, 0x93, 0x3e, 0xdb, 0x04, 0x0c,
+        't',  'h',  'i',  's',
         // uncompressed
-        0x01, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59,
+         0x01, 0x0a, 0x00, 0x00, 0xc0, 0x80,
+        0x04, 0xaa, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59,
         // padding
-        0xfe, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59,
+        0xfe, 0x06,
+        0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59,
     };
 
     var arraylistdata = std.ArrayList(u8).init(std.testing.allocator);
@@ -99,8 +136,6 @@ test "get chunk type" {
     try decode(std.testing.allocator, fbswriter, &ck);
     const dumped = arraylistdata.items;
 
-    // need to figure out why writer is writing in reverse order
-    // should be sNaPpYthis
     const expected = "thissNaPpY";
     try std.testing.expectEqualSlices(std.meta.Child([]const u8), dumped, expected);
 }
