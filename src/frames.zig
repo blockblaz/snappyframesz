@@ -40,13 +40,14 @@ pub fn decode(allocator: Allocator, writer: anytype, data: []const u8) !void {
     }
 }
 
-pub fn encode(allocator: Allocator, writer: anytype, data: []const u8) !void {
+pub fn encode(allocator: Allocator, writer: anytype, data: []u8) !void {
     // push identifier frame
     try writer.writeAll(&IDENTIFIER_FRAME);
     var i: usize = 0;
     while (i < data.len) {
-        const chunk = data[i .. i + UNCOMPRESSED_CHUNK_SIZE];
-        const compressed = snappy.encode(allocator, chunk);
+        std.debug.print("chunk[{d}..{d}]", .{ i, i + UNCOMPRESSED_CHUNK_SIZE });
+        const chunk = data[i..@min(i + UNCOMPRESSED_CHUNK_SIZE, data.len)];
+        const compressed = try snappy.encode(allocator, chunk);
         defer allocator.free(compressed);
 
         if (compressed.len < chunk.len) {
@@ -54,19 +55,23 @@ pub fn encode(allocator: Allocator, writer: anytype, data: []const u8) !void {
             const frame_header = [_]u8{ @as(u8, @intFromEnum(ChunkType.COMPRESSED)), @as(u8, @truncate(size)), @as(u8, @truncate(size >> 8)), @as(u8, @truncate(size >> 16)) };
 
             const crc_hash = snappy.crc(chunk);
-            const crc_bytes: [4]u8 = undefined;
+            const crc_bytes = try allocator.alloc(u8, 4);
+            defer allocator.free(crc_bytes);
             std.mem.writePackedInt(u32, crc_bytes, 0, crc_hash, .little);
 
-            try writer.writeAll(frame_header ++ crc_bytes ++ compressed);
+            try writer.writeAll(frame_header ++ crc_bytes[0..4]);
+            try writer.writeAll(compressed);
         } else {
             const size = chunk.len + 4;
             const frame_header = [_]u8{ @as(u8, @intFromEnum(ChunkType.UNCOMPRESSED)), @as(u8, @truncate(size)), @as(u8, @truncate(size >> 8)), @as(u8, @truncate(size >> 16)) };
 
             const crc_hash = snappy.crc(chunk);
-            const crc_bytes: [4]u8 = undefined;
-            std.mem.writePackedIntLittle(u32, crc_bytes, 0, crc_hash);
+            const crc_bytes = try allocator.alloc(u8, 4);
+            defer allocator.free(crc_bytes);
+            std.mem.writePackedInt(u32, crc_bytes, 0, crc_hash, .little);
 
-            try writer.writeAll(frame_header ++ crc_bytes ++ chunk);
+            try writer.writeAll(frame_header ++ crc_bytes[0..4]);
+            try writer.writeAll(chunk);
         }
         i = i + UNCOMPRESSED_CHUNK_SIZE;
     }
@@ -114,7 +119,7 @@ const IDENTIFIER_STRING = [_]u8{ 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59 };
 const IDENTIFIER_FRAME = [_]u8{ 0xff, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59 };
 const UNCOMPRESSED_CHUNK_SIZE = 65536;
 
-test "get chunk type" {
+test "decode" {
     const ck = [_]u8{
         // frame
         0xff, 0x06, 0x00, 0x00, 0x73, 0x4e, 0x61, 0x50, 0x70, 0x59,
@@ -137,5 +142,23 @@ test "get chunk type" {
     const dumped = arraylistdata.items;
 
     const expected = "thissNaPpY";
+    try std.testing.expectEqualSlices(std.meta.Child([]const u8), dumped, expected);
+}
+
+test "encode" {
+    const data = "thissNaPpY";
+    const data_slice = try std.testing.allocator.alloc(u8, data.len);
+    defer std.testing.allocator.free(data_slice);
+
+    std.mem.copyForwards(u8, data_slice, data);
+
+    var arraylistdata = std.ArrayList(u8).init(std.testing.allocator);
+    defer arraylistdata.deinit();
+    const fbswriter = arraylistdata.writer();
+
+    try encode(std.testing.allocator, fbswriter, data_slice);
+    const dumped = arraylistdata.items;
+    const expected = IDENTIFIER_FRAME ++ [_]u8{ 0x01, 0x0e, 0x00, 0x00, 0x58, 0x09, 0xd7, 0x88 } ++ "thissNaPpY";
+
     try std.testing.expectEqualSlices(std.meta.Child([]const u8), dumped, expected);
 }
