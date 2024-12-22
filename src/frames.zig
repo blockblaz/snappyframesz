@@ -45,7 +45,6 @@ pub fn encode(allocator: Allocator, writer: anytype, data: []u8) !void {
     try writer.writeAll(&IDENTIFIER_FRAME);
     var i: usize = 0;
     while (i < data.len) {
-        std.debug.print("chunk[{d}..{d}]", .{ i, i + UNCOMPRESSED_CHUNK_SIZE });
         const chunk = data[i..@min(i + UNCOMPRESSED_CHUNK_SIZE, data.len)];
         const compressed = try snappy.encode(allocator, chunk);
         defer allocator.free(compressed);
@@ -146,6 +145,7 @@ test "decode" {
 }
 
 test "encode" {
+    // this should lead to an uncompressed chunk
     const data = "thissNaPpY";
     const data_slice = try std.testing.allocator.alloc(u8, data.len);
     defer std.testing.allocator.free(data_slice);
@@ -161,4 +161,27 @@ test "encode" {
     const expected = IDENTIFIER_FRAME ++ [_]u8{ 0x01, 0x0e, 0x00, 0x00, 0x58, 0x09, 0xd7, 0x88 } ++ "thissNaPpY";
 
     try std.testing.expectEqualSlices(std.meta.Child([]const u8), dumped, expected);
+}
+
+test "encode<>decode" {
+    // this should lead to a compressed chunk
+    const data = "thissNaPpYYYYYYYYYYYYYYYYYYYY";
+    const data_slice = try std.testing.allocator.alloc(u8, data.len);
+    defer std.testing.allocator.free(data_slice);
+
+    std.mem.copyForwards(u8, data_slice, data);
+    var arraylistdata = std.ArrayList(u8).init(std.testing.allocator);
+    defer arraylistdata.deinit();
+    const fbswriter = arraylistdata.writer();
+
+    try encode(std.testing.allocator, fbswriter, data_slice);
+    const encoded = arraylistdata.items;
+
+    var arraylistdata1 = std.ArrayList(u8).init(std.testing.allocator);
+    defer arraylistdata1.deinit();
+    const fbswriter1 = arraylistdata1.writer();
+    try decode(std.testing.allocator, fbswriter1, encoded);
+    const decoded = arraylistdata1.items;
+
+    try std.testing.expectEqualSlices(std.meta.Child([]const u8), data, decoded);
 }
