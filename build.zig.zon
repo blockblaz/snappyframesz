@@ -3,7 +3,7 @@
     .version = "0.0.1",
     .dependencies = .{
         .snappyz = .{
-            .url = "https://github.com/guha-rahul/zig-snappy/archive/d1fd3d7.tar.gz",
+            .url = "https://github.com/blockblaz/zig-snappy/archive/beb2a56.tar.gz",
             .hash = "1220c856c5d5b87a07060fd0f74568a36ac9d619cf711d949d342c2340df936d20e7",
         },
     },
