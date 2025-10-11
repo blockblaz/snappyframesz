@@ -113,11 +113,11 @@ pub fn encode(allocator: Allocator, data: []const u8) ![]u8 {
     while (index < data.len) {
         const end_index = @min(index + recommended_chunk, data.len);
         const chunk_input = data[index..end_index];
-            try encoder.writeChunk(output.writer(allocator), chunk_input);
+        try encoder.writeChunk(output.writer(allocator), chunk_input);
         index = end_index;
     }
 
-        try encoder.finish(output.writer(allocator));
+    try encoder.finish(output.writer(allocator));
 
     return output.toOwnedSlice(allocator);
 }
