@@ -1,0 +1,126 @@
+name: Auto Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - release
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Zig
+        uses: korandoru/setup-zig@v1
+        with:
+          zig-version: 0.14.0
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(cat VERSION)
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.VERSION }}" >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Exit if tag exists
+        if: steps.check_tag.outputs.exists == 'true'
+        run: |
+          echo "Tag v${{ steps.version.outputs.VERSION }} already exists. Skipping release."
+          exit 0
+
+      - name: Run tests
+        if: steps.check_tag.outputs.exists == 'false'
+        run: zig build test --summary all
+
+      - name: Build library
+        if: steps.check_tag.outputs.exists == 'false'
+        run: zig build
+
+      - name: Update build.zig.zon version
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          sed -i "s/\.version = \".*\"/\.version = \"${{ steps.version.outputs.VERSION }}\"/" build.zig.zon
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add build.zig.zon
+          git diff --cached --quiet || git commit -m "chore: bump version to ${{ steps.version.outputs.VERSION }}"
+
+      - name: Generate changelog
+        if: steps.check_tag.outputs.exists == 'false'
+        id: changelog
+        run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$PREVIOUS_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          else
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Git tag
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          git tag -a "v${{ steps.version.outputs.VERSION }}" -m "Release v${{ steps.version.outputs.VERSION }}"
+          git push origin "v${{ steps.version.outputs.VERSION }}"
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          release_name: v${{ steps.version.outputs.VERSION }}
+          body: |
+            # Release v${{ steps.version.outputs.VERSION }}
+
+            ## Changes
+            ${{ steps.changelog.outputs.CHANGELOG }}
+
+            ## Usage
+            To use this release in your Zig project:
+
+            ```bash
+            zig fetch --save https://github.com/${{ github.repository }}/archive/v${{ steps.version.outputs.VERSION }}.tar.gz
+            ```
+
+            Then add to your `build.zig`:
+
+            ```zig
+            const snappyframesz = b.dependency("snappyframesz", .{
+                .target = target,
+                .optimize = optimize,
+            });
+            exe.root_module.addImport("snappyframesz", snappyframesz.module("snappyframesz"));
+            ```
+          draft: false
+          prerelease: false
+
+      - name: Calculate tarball hash
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          TARBALL_URL="https://github.com/${{ github.repository }}/archive/v${{ steps.version.outputs.VERSION }}.tar.gz"
+          echo "Tarball URL: $TARBALL_URL"
+          echo "Calculating hash..."
+          curl -L "$TARBALL_URL" | sha256sum
+          echo ""
+          echo "Use the above hash when adding this package as a dependency."
