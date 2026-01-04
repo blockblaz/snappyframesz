@@ -33,7 +33,7 @@
 
     .dependencies = .{
         .snappyz = .{
-            .url = "git+https://github.com/blockblaz/zig-snappy#e87ad0795616c277c0da60ea8d8d63bbe215b841",
+            .url = "https://github.com/blockblaz/zig-snappy/archive/77cb4c2a0e0c337a40454f62590459e671bc74bc.tar.gz",
             .hash = "zig_snappy-0.0.1-bDFzXvtdAAAO8v80PSHrSZauByEckEZGYjWjJL8gWlvO",
         },
     },
