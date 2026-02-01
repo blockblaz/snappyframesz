@@ -9,7 +9,7 @@ pub fn build(b: *Builder) void {
         .optimize = optimize,
     }).module("snappyz");
 
-    const mod = b.addModule("snappyframesz.zig", Builder.Module.CreateOptions{
+    const mod = b.addModule("snappyframesz.zig", .{
         .root_source_file = b.path("src/frames.zig"),
         .target = target,
         .optimize = optimize,
@@ -17,22 +17,23 @@ pub fn build(b: *Builder) void {
             .{ .name = "snappyz", .module = snappyz },
         },
     });
-    _ = mod;
 
-    const lib = b.addStaticLibrary(.{
+    const lib = b.addLibrary(.{
         .name = "snappyframesz",
-        .root_source_file = .{ .cwd_relative = "src/frames.zig" },
-        .optimize = optimize,
-        .target = target,
+        .root_module = mod,
     });
     b.installArtifact(lib);
 
     const tests = b.addTest(.{
-        .root_source_file = .{ .cwd_relative = "src/frames.zig" },
-        .optimize = optimize,
-        .target = target,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/frames.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "snappyz", .module = snappyz },
+            },
+        }),
     });
-    tests.root_module.addImport("snappyz", snappyz);
 
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
