@@ -4,7 +4,6 @@ const snappyz = @import("snappyz");
 
 const Allocator = std.mem.Allocator;
 const math = std.math;
-const meta = std.meta;
 
 const FrameError = error{
     UnexpectedEof,
@@ -30,7 +29,7 @@ const ChunkType = enum(u8) {
     pub const ParseError = error{InvalidValue};
 
     pub fn fromByte(value: u8) ParseError!ChunkType {
-        return meta.intToEnum(ChunkType, value) catch ParseError.InvalidValue;
+        return std.enums.fromInt(ChunkType, value) orelse ParseError.InvalidValue;
     }
 
     pub fn toByte(self: ChunkType) u8 {
@@ -104,8 +103,8 @@ pub const FrameEncoder = struct {
 
 /// Encode all data into a fresh Snappy frame stored in an owned slice.
 pub fn encode(allocator: Allocator, data: []const u8) ![]u8 {
-    var output = std.ArrayListUnmanaged(u8).empty;
-    errdefer output.deinit(allocator);
+    var allocating = std.Io.Writer.Allocating.init(allocator);
+    errdefer allocating.deinit();
 
     var encoder = FrameEncoder.init(allocator);
 
@@ -113,24 +112,24 @@ pub fn encode(allocator: Allocator, data: []const u8) ![]u8 {
     while (index < data.len) {
         const end_index = @min(index + recommended_chunk, data.len);
         const chunk_input = data[index..end_index];
-        try encoder.writeChunk(output.writer(allocator), chunk_input);
+        try encoder.writeChunk(&allocating.writer, chunk_input);
         index = end_index;
     }
 
-    try encoder.finish(output.writer(allocator));
+    try encoder.finish(&allocating.writer);
 
-    return output.toOwnedSlice(allocator);
+    return allocating.toOwnedSlice();
 }
 
 /// Stream input from `reader` into the frame writer without buffering the entire payload.
-pub fn encodeToWriter(allocator: Allocator, reader: anytype, writer: anytype) !void {
+pub fn encodeToWriter(allocator: Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer) !void {
     var encoder = FrameEncoder.init(allocator);
 
     var chunk_input_buffer = try allocator.alloc(u8, recommended_chunk);
     defer allocator.free(chunk_input_buffer);
 
     while (true) {
-        const read_len = try reader.read(chunk_input_buffer);
+        const read_len = try reader.readSliceShort(chunk_input_buffer);
         if (read_len == 0) break;
 
         try encoder.writeChunk(writer, chunk_input_buffer[0..read_len]);
@@ -152,8 +151,8 @@ pub fn decode(allocator: Allocator, data: []const u8) ![]u8 {
 }
 
 /// Decode framed input from `reader`, writing decompressed output into `writer`.
-pub fn decodeFromReader(allocator: Allocator, reader: anytype, writer: anytype) !void {
-    var chunk_buf = std.ArrayListUnmanaged(u8).empty;
+pub fn decodeFromReader(allocator: Allocator, reader: *std.Io.Reader, writer: *std.Io.Writer) !void {
+    var chunk_buf: std.ArrayList(u8) = .empty;
     defer chunk_buf.deinit(allocator);
 
     var processed_any_chunk = false;
@@ -222,8 +221,8 @@ fn decodeFramed(allocator: Allocator, data: []const u8) ![]u8 {
     var saw_data_chunk = false;
     var saw_stream_identifier = false;
 
-    var output = std.ArrayListUnmanaged(u8).empty;
-    errdefer output.deinit(allocator);
+    var allocating = std.Io.Writer.Allocating.init(allocator);
+    errdefer allocating.deinit();
 
     while (cursor < data.len) {
         if (data.len - cursor < 4) return FrameError.UnexpectedEof;
@@ -251,13 +250,11 @@ fn decodeFramed(allocator: Allocator, data: []const u8) ![]u8 {
                     saw_stream_identifier = true;
                 },
                 .compressed => {
-                    const writer = output.writer(allocator);
-                    try writeCompressedChunk(allocator, writer, chunk_data);
+                    try writeCompressedChunk(allocator, &allocating.writer, chunk_data);
                     saw_data_chunk = true;
                 },
                 .uncompressed => {
-                    const writer = output.writer(allocator);
-                    try writeUncompressedChunk(writer, chunk_data);
+                    try writeUncompressedChunk(&allocating.writer, chunk_data);
                     saw_data_chunk = true;
                 },
             }
@@ -276,7 +273,7 @@ fn decodeFramed(allocator: Allocator, data: []const u8) ![]u8 {
     if (!saw_data_chunk) return FrameError.NotFramed;
 
     // Some producers may omit the identifier. Only enforce when data present with mismatched chunk.
-    return output.toOwnedSlice(allocator);
+    return allocating.toOwnedSlice();
 }
 
 fn ensureStreamIdentifier(chunk_payload: []const u8) !void {
@@ -286,7 +283,7 @@ fn ensureStreamIdentifier(chunk_payload: []const u8) !void {
     }
 }
 
-fn writeUncompressedChunk(writer: anytype, chunk_payload: []const u8) !void {
+fn writeUncompressedChunk(writer: *std.Io.Writer, chunk_payload: []const u8) !void {
     if (chunk_payload.len < 4) return FrameError.UnexpectedEof;
     const expected_checksum = readU32le(chunk_payload[0..4]);
     const raw_payload = chunk_payload[4..];
@@ -294,7 +291,7 @@ fn writeUncompressedChunk(writer: anytype, chunk_payload: []const u8) !void {
     try writer.writeAll(raw_payload);
 }
 
-fn writeCompressedChunk(allocator: Allocator, writer: anytype, chunk_payload: []const u8) !void {
+fn writeCompressedChunk(allocator: Allocator, writer: *std.Io.Writer, chunk_payload: []const u8) !void {
     if (chunk_payload.len < 4) return FrameError.UnexpectedEof;
     const expected_checksum = readU32le(chunk_payload[0..4]);
     const compressed_payload = chunk_payload[4..];
@@ -304,7 +301,7 @@ fn writeCompressedChunk(allocator: Allocator, writer: anytype, chunk_payload: []
     try writer.writeAll(decoded);
 }
 
-fn writeChunkHeader(writer: anytype, chunk_type: ChunkType, payload_len: usize) !void {
+fn writeChunkHeader(writer: *std.Io.Writer, chunk_type: ChunkType, payload_len: usize) !void {
     if (payload_len > max_chunk_len) return FrameError.ChunkTooLarge;
     const chunk_type_byte: u8 = chunk_type.toByte();
     const byte0: u8 = @intCast(payload_len & 0xff);
@@ -349,31 +346,24 @@ fn crc32c(data: []const u8) u32 {
     return std.hash.crc.Crc32Iscsi.hash(data);
 }
 
-fn readExact(reader: anytype, buffer: []u8) !void {
+fn readExact(reader: *std.Io.Reader, buffer: []u8) !void {
     var index: usize = 0;
     while (index < buffer.len) {
-        const read_len = try reader.read(buffer[index..]);
+        const read_len = try reader.readSliceShort(buffer[index..]);
         if (read_len == 0) return FrameError.UnexpectedEof;
         index += read_len;
     }
 }
 
-fn readByte(reader: anytype) !?u8 {
+fn readByte(reader: *std.Io.Reader) !?u8 {
     var byte: [1]u8 = undefined;
-    const read_len = try reader.read(&byte);
+    const read_len = try reader.readSliceShort(&byte);
     if (read_len == 0) return null;
     return byte[0];
 }
 
 fn loadFileAlloc(allocator: Allocator, path: []const u8) ![]u8 {
-    var file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-
-    const stat = try file.stat();
-    const buf = try allocator.alloc(u8, stat.size);
-    const read_len = try file.readAll(buf);
-    std.debug.assert(read_len == stat.size);
-    return buf;
+    return std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, allocator, .unlimited);
 }
 
 const go_writer_golden_frame =
@@ -406,13 +396,13 @@ test "encodeToWriter matches encode" {
     const direct = try encode(allocator, sample);
     defer allocator.free(direct);
 
-    var reader_stream = std.io.fixedBufferStream(sample);
-    var encoded_buffer = std.ArrayListUnmanaged(u8).empty;
-    defer encoded_buffer.deinit(allocator);
+    var reader_stream: std.Io.Reader = .fixed(sample);
+    var encoded_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer encoded_buffer.deinit();
 
-    try encodeToWriter(allocator, reader_stream.reader(), encoded_buffer.writer(allocator));
+    try encodeToWriter(allocator, &reader_stream, &encoded_buffer.writer);
 
-    try std.testing.expectEqualSlices(u8, direct, encoded_buffer.items);
+    try std.testing.expectEqualSlices(u8, direct, encoded_buffer.written());
 }
 
 test "FrameEncoder manual streaming API" {
@@ -420,17 +410,17 @@ test "FrameEncoder manual streaming API" {
     const parts = [_][]const u8{ "frame-", "encoder-", "stream" };
 
     var encoder = FrameEncoder.init(allocator);
-    var encoded = std.ArrayListUnmanaged(u8).empty;
-    defer encoded.deinit(allocator);
+    var encoded = std.Io.Writer.Allocating.init(allocator);
+    defer encoded.deinit();
 
     var i: usize = 0;
     while (i < parts.len) : (i += 1) {
-        try encoder.writeChunk(encoded.writer(allocator), parts[i]);
+        try encoder.writeChunk(&encoded.writer, parts[i]);
     }
 
-    try encoder.finish(encoded.writer(allocator));
+    try encoder.finish(&encoded.writer);
 
-    var combined_builder = std.ArrayListUnmanaged(u8).empty;
+    var combined_builder: std.ArrayList(u8) = .empty;
     defer combined_builder.deinit(allocator);
     for (parts) |segment| {
         try combined_builder.appendSlice(allocator, segment);
@@ -438,12 +428,13 @@ test "FrameEncoder manual streaming API" {
     const combined = try combined_builder.toOwnedSlice(allocator);
     defer allocator.free(combined);
 
-    const decoded_manual = try decode(allocator, encoded.items);
+    const encoded_bytes = encoded.written();
+    const decoded_manual = try decode(allocator, encoded_bytes);
     defer allocator.free(decoded_manual);
 
     try std.testing.expectEqualSlices(u8, combined, decoded_manual);
 
-    try std.testing.expect(std.mem.startsWith(u8, encoded.items, stream_identifier));
+    try std.testing.expect(std.mem.startsWith(u8, encoded_bytes, stream_identifier));
 }
 
 test "decodeFromReader matches decode" {
@@ -453,13 +444,13 @@ test "decodeFromReader matches decode" {
     const encoded = try encode(allocator, sample);
     defer allocator.free(encoded);
 
-    var reader_stream = std.io.fixedBufferStream(encoded);
-    var decoded_buffer = std.ArrayListUnmanaged(u8).empty;
-    defer decoded_buffer.deinit(allocator);
+    var reader_stream: std.Io.Reader = .fixed(encoded);
+    var decoded_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer decoded_buffer.deinit();
 
-    try decodeFromReader(allocator, reader_stream.reader(), decoded_buffer.writer(allocator));
+    try decodeFromReader(allocator, &reader_stream, &decoded_buffer.writer);
 
-    try std.testing.expectEqualSlices(u8, sample, decoded_buffer.items);
+    try std.testing.expectEqualSlices(u8, sample, decoded_buffer.written());
 }
 
 test "frame roundtrip samples" {

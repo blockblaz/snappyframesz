@@ -3,3 +3,5 @@ main*
 zig-cache/
 .zig-cache/
 zig-out/
+zig-pkg/
+.tool-versions
