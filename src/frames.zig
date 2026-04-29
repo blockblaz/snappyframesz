@@ -212,7 +212,10 @@ pub fn decodeFromReader(allocator: Allocator, reader: anytype, writer: anytype) 
         chunk_buf.clearRetainingCapacity();
     }
 
-    if (!saw_data_chunk) return FrameError.NotFramed;
+    // A stream that contained the identifier but no data chunks is a valid
+    // empty payload per the Snappy framing spec. Only treat the input as
+    // unframed when neither was seen.
+    if (!saw_stream_identifier and !saw_data_chunk) return FrameError.NotFramed;
 }
 
 fn decodeFramed(allocator: Allocator, data: []const u8) ![]u8 {
@@ -273,7 +276,10 @@ fn decodeFramed(allocator: Allocator, data: []const u8) ![]u8 {
         return FrameError.UnsupportedUnskippableChunkType;
     }
 
-    if (!saw_data_chunk) return FrameError.NotFramed;
+    // A stream that contained the identifier but no data chunks is a valid
+    // empty payload per the Snappy framing spec. Only treat the input as
+    // unframed when neither was seen.
+    if (!saw_stream_identifier and !saw_data_chunk) return FrameError.NotFramed;
 
     // Some producers may omit the identifier. Only enforce when data present with mismatched chunk.
     return output.toOwnedSlice(allocator);
@@ -524,6 +530,33 @@ test "decode falls back to raw snappy payloads" {
     defer allocator.free(decoded);
 
     try std.testing.expectEqualSlices(u8, sample, decoded);
+}
+
+test "decode accepts identifier-only stream as empty payload" {
+    // A frame containing only the stream identifier (no data chunks) is a
+    // valid empty payload per the Snappy framing spec. Go's snappy.NewReader
+    // and Rust's snap::read::FrameDecoder both decode this 10-byte input to
+    // an empty slice; cross-client interop fixtures (e.g. leanSpec) emit
+    // exactly this representation for empty input.
+    const allocator = std.testing.allocator;
+    const identifier_only = "\xff\x06\x00\x00sNaPpY";
+
+    const decoded = try decode(allocator, identifier_only);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqual(@as(usize, 0), decoded.len);
+}
+
+test "decodeFromReader accepts identifier-only stream as empty payload" {
+    const allocator = std.testing.allocator;
+    const identifier_only = "\xff\x06\x00\x00sNaPpY";
+
+    var input_stream = std.io.fixedBufferStream(identifier_only);
+    var output = std.ArrayListUnmanaged(u8).empty;
+    defer output.deinit(allocator);
+
+    try decodeFromReader(allocator, input_stream.reader(), output.writer(allocator));
+    try std.testing.expectEqual(@as(usize, 0), output.items.len);
 }
 
 test "decode rejects invalid stream identifier" {
