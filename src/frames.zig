@@ -211,7 +211,13 @@ pub fn decodeFromReader(allocator: Allocator, reader: *std.Io.Reader, writer: *s
         chunk_buf.clearRetainingCapacity();
     }
 
-    if (!saw_data_chunk) return FrameError.NotFramed;
+    // A stream that contains the identifier but no data chunks is a valid
+    // empty payload per the Snappy framing spec. Only treat the input as
+    // unframed when neither was seen — peer clients (Go's snappy.NewReader,
+    // Rust's snap::read::FrameDecoder) accept this shape and decode it to
+    // an empty slice. Cross-client interop fixtures emit exactly the
+    // 10-byte "\xff\x06\x00\x00sNaPpY" form for empty input.
+    if (!saw_stream_identifier and !saw_data_chunk) return FrameError.NotFramed;
 }
 
 fn decodeFramed(allocator: Allocator, data: []const u8) ![]u8 {
@@ -270,9 +276,12 @@ fn decodeFramed(allocator: Allocator, data: []const u8) ![]u8 {
         return FrameError.UnsupportedUnskippableChunkType;
     }
 
-    if (!saw_data_chunk) return FrameError.NotFramed;
+    // A stream that contains the identifier but no data chunks is a valid
+    // empty payload per the Snappy framing spec. Only treat the input as
+    // unframed when neither was seen — see `decodeFromReader` for the
+    // full rationale.
+    if (!saw_stream_identifier and !saw_data_chunk) return FrameError.NotFramed;
 
-    // Some producers may omit the identifier. Only enforce when data present with mismatched chunk.
     return allocating.toOwnedSlice();
 }
 
@@ -600,4 +609,35 @@ test "encode compatibility with rust snappy frame alice29" {
     defer allocator.free(encoded);
 
     try std.testing.expectEqualSlices(u8, expected_frame, encoded);
+}
+
+test "decode accepts identifier-only stream as empty payload" {
+    // Canonical 10-byte "empty" Snappy framed stream: stream identifier
+    // chunk only, no data chunks. Go's `snappy.NewReader` and Rust's
+    // `snap::read::FrameDecoder` both decode this to an empty slice;
+    // accepting it here makes the decoder interoperable with peer
+    // implementations and with leanSpec's `test_snappy_frame_empty`
+    // fixture. The existing "frame roundtrip samples" test already covered
+    // round-tripping "" through the lib's own encoder, but the encoder
+    // appends an empty data chunk in finish(), which masked the gap on the
+    // decode side.
+    const allocator = std.testing.allocator;
+    const identifier_only = "\xff\x06\x00\x00sNaPpY";
+
+    const decoded = try decode(allocator, identifier_only);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqual(@as(usize, 0), decoded.len);
+}
+
+test "decodeFromReader accepts identifier-only stream as empty payload" {
+    const allocator = std.testing.allocator;
+    const identifier_only = "\xff\x06\x00\x00sNaPpY";
+
+    var reader_stream: std.Io.Reader = .fixed(identifier_only);
+    var decoded_buffer = std.Io.Writer.Allocating.init(allocator);
+    defer decoded_buffer.deinit();
+
+    try decodeFromReader(allocator, &reader_stream, &decoded_buffer.writer);
+    try std.testing.expectEqual(@as(usize, 0), decoded_buffer.written().len);
 }
